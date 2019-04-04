@@ -1,111 +1,94 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <time.h>
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
 
-#define NSTRS       3           /* no. of strings  */
-#define ADDRESS     "./../test" /* addr to connect */
 
-/*
- * Strings we send to the client.
- * https://users.cs.cf.ac.uk/Dave.Marshall/C/node28.html
- */
-char *strs[NSTRS] = {
-    "This is the first string from the server.\n",
-    "This is the second string from the server.\n",
-    "This is the third string from the server.\n"
-};
+#define SOCK_PATH "../echo_socket"
 
-main()
+int main(void)
 {
-    char c;
-    FILE *fp;
-    socklen_t fromlen;
-    register int i, s, ns, len;
-    struct sockaddr_un saun, fsaun;
+    int                 s, s2, t, len;
+    struct sockaddr_un  local, remote;
+    char                str[100];
+    int                 stat = 0;
+    int last_stat = 0;
 
-    /*
-     * Get a socket to work with.  This socket will
-     * be in the UNIX domain, and will be a
-     * stream socket.
-     */
-    if ((s = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
-        perror("server: socket");
+    if ((s = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+        perror("socket");
         exit(1);
     }
 
-    /*
-     * Create the address we will be binding to.
-     */
-    saun.sun_family = AF_UNIX;
-    strcpy(saun.sun_path, ADDRESS);
+    local.sun_family = AF_UNIX;
+    strcpy(local.sun_path, SOCK_PATH);
+    unlink(local.sun_path);
+    len = strlen(local.sun_path) + sizeof(local.sun_family);
 
-    /*
-     * Try to bind the address to the socket.  We
-     * unlink the name first so that the bind won't
-     * fail.
-     *
-     * The third argument indicates the "length" of
-     * the structure, not just the length of the
-     * socket name.
-     */
-    unlink(ADDRESS);
-    len = sizeof(saun.sun_family) + strlen(saun.sun_path);
-
-    if (bind(s, (struct sockaddr*)&saun, len) < 0) {
-        perror("server: bind");
+    if (bind(s, (struct sockaddr *)&local, len) == -1) {
+        perror("bind");
+        close(s);
         exit(1);
     }
 
-    /*
-     * Listen on the socket.
-     */
-    if (listen(s, 5) < 0) {
-        perror("server: listen");
+    if (listen(s, 5) == -1) {
+        perror("listen");
+        close(s);
         exit(1);
     }
 
-    /*
-     * Accept connections.  When we accept one, ns
-     * will be connected to the client.  fsaun will
-     * contain the address of the client.
-     */
-    if ((ns = accept(s, (struct sockaddr*)&fsaun, &fromlen)) < 0) {
-        perror("server: accept");
-        exit(1);
-    }
-
-    /*
-     * We'll use stdio for reading the socket.
-     */
-    fp = fdopen(ns, "r");
-
-    /*
-     * First we send some strings to the client.
-     */
-    for (i = 0; i < NSTRS; i++)
-        send(ns, strs[i], strlen(strs[i]), 0);
-
-    /*
-     * Then we read some strings from the client and
-     * print them out.
-     */
-    for (i = 0; i < NSTRS; i++) {
-        while ((c = fgetc(fp)) != EOF) {
-            putchar(c);
-
-            if (c == '\n')
-                break;
+    for(;;) {
+        int n;
+        printf("Waiting for a connection...\n");
+        t = sizeof(remote);
+        if ((s2 = accept(s, (struct sockaddr *)&remote, (socklen_t*)&t)) == -1) {
+            perror("accept");
+            close(s);
+            exit(1);
         }
+
+        printf("Connected.\n");
+
+        do {
+            uint8_t  buffer[1400];
+            uint32_t frame_len;
+            int now = time(NULL);
+
+            n = recv(s2, &frame_len, sizeof(frame_len), 0);
+            frame_len = be32toh(frame_len);
+
+            if (n < sizeof(uint32_t)) {
+                break;
+            }
+
+            n = recv(s2, buffer, frame_len, 0);
+
+            if (frame_len > 0) {
+                if (n < frame_len) {
+                    close(s);
+                    perror("recv");
+                    break;
+                }
+            }
+
+
+            stat += frame_len + sizeof(uint32_t);
+
+            if (now - last_stat > 1) {
+                last_stat = now;
+                printf("received %f MB.\n", ((float)stat / 1024 / 1024));
+                stat = 0;
+            }
+        } while (1);
+
+        close(s2);
     }
 
-    /*
-     * We can simply use close() to terminate the
-     * connection, since we're done with both sides.
-     */
-    close(s);
-
-    exit(0);
+    return 0;
 }
